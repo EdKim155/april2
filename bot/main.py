@@ -137,7 +137,7 @@ class AprilBot:
 
         return application
 
-    async def run(self):
+    def run(self):
         """Run the bot."""
         logger.info("🤖 Starting April Shipments Bot v2.0...")
 
@@ -150,7 +150,7 @@ class AprilBot:
 
         # Run bot
         logger.info("🚀 Bot is running...")
-        await self.application.run_polling(
+        self.application.run_polling(
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True
         )
@@ -160,7 +160,7 @@ def main():
     """Main entry point."""
     try:
         bot = AprilBot()
-        asyncio.run(bot.run())
+        bot.run()
     except KeyboardInterrupt:
         logger.info("👋 Bot stopped by user")
     except Exception as e:

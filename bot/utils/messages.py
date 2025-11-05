@@ -3,19 +3,9 @@
 from bot.database.models import Shipment
 
 
-# Brand logo (text-based)
-LOGO = """
-╔══════════════════════════════╗
-║   АПРЕЛЬ сеть аптек          ║
-╚══════════════════════════════╝
-"""
-
-
 def get_welcome_message() -> str:
     """Get welcome message for /start command."""
-    return f"""{LOGO}
-
-Пришлем сообщение как только будут назначены перевозки"""
+    return """Пришлем сообщение как только будут назначены перевозки"""
 
 
 def get_new_shipments_notification() -> str:
@@ -26,25 +16,19 @@ def get_new_shipments_notification() -> str:
 
 def get_no_shipments_message() -> str:
     """Get message when no shipments available."""
-    return f"""{LOGO}
-
-Перевозок нет"""
+    return """Перевозок нет"""
 
 
 def get_no_my_shipments_message() -> str:
     """Get message when user has no booked shipments."""
-    return f"""{LOGO}
-
-📋 Мои перевозки:
+    return """📋 Мои перевозки:
 
 У вас пока нет забронированных перевозок"""
 
 
 def get_my_shipments_header() -> str:
     """Get header for my shipments list."""
-    return f"""{LOGO}
-
-📋 Мои перевозки:"""
+    return """📋 Мои перевозки:"""
 
 
 def get_shipment_detail_message(shipment: Shipment) -> str:
@@ -59,9 +43,7 @@ def get_shipment_detail_message(shipment: Shipment) -> str:
     """
     loading_date = shipment.loading_date.strftime('%Y-%m-%d %H:%M:%S')
 
-    message = f"""{LOGO}
-
-Погрузка: {shipment.loading_point}
+    message = f"""Погрузка: {shipment.loading_point}
 Номер: {shipment.shipment_id}
 Дата и время подачи авто: будет готова к погрузке до {loading_date}
 Направление: {shipment.direction}
@@ -89,9 +71,7 @@ def get_booking_success_message(shipment_id: str, direction: str) -> str:
     Returns:
         str: Formatted success message
     """
-    return f"""{LOGO}
-
-✅ Перевозка {shipment_id} успешно забронирована!
+    return f"""✅ Перевозка {shipment_id} успешно забронирована!
 
 Направление: {direction}
 Ваше имя добавлено в систему."""
@@ -109,9 +89,7 @@ def get_booking_failed_message(shipment_id: str, booked_by: str, booked_at: str)
     Returns:
         str: Formatted failure message
     """
-    return f"""{LOGO}
-
-❌ Перевозка {shipment_id} уже забронирована
+    return f"""❌ Перевозка {shipment_id} уже забронирована
 
 Забронировал: {booked_by}
 Время бронирования: {booked_at}"""
@@ -127,15 +105,11 @@ def get_cancellation_success_message(shipment_id: str) -> str:
     Returns:
         str: Formatted cancellation message
     """
-    return f"""{LOGO}
-
-✅ Бронирование отменено
+    return f"""✅ Бронирование отменено
 
 Перевозка {shipment_id} снова доступна для бронирования."""
 
 
 def get_stub_message() -> str:
     """Get stub message for features under development."""
-    return f"""{LOGO}
-
-Раздел находится в разработке"""
+    return """Раздел находится в разработке"""

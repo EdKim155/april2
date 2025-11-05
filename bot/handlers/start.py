@@ -1,9 +1,10 @@
 """Start command handler."""
 
 import logging
-from telegram import Update
+from telegram import Update, InputFile
 from telegram.ext import ContextTypes
 
+from bot.config import LOGO_PATH
 from bot.database.connection import get_db_session
 from bot.database.crud import create_or_update_user
 from bot.utils.keyboards import build_main_menu_keyboard
@@ -32,11 +33,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     logger.info(f"👤 User {user.id} (@{user.username}) started the bot")
 
-    # Send welcome message with main menu
+    # Send welcome message with main menu and logo
     keyboard = build_main_menu_keyboard()
     message = get_welcome_message()
 
-    await update.message.reply_text(
-        text=message,
-        reply_markup=keyboard
-    )
+    with open(LOGO_PATH, 'rb') as photo:
+        await update.message.reply_photo(
+            photo=photo,
+            caption=message,
+            reply_markup=keyboard
+        )

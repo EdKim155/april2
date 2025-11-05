@@ -80,10 +80,19 @@ class GoogleSheetManager:
         """
         try:
             self._refresh_connection()
+
+            # Check if sheet has any data
+            all_values = self.sheet.get_all_values()
+            if not all_values or len(all_values) < 2:
+                logger.warning("⚠️ Google Sheet is empty or has no data rows (only headers)")
+                return []
+
+            # Get records only if we have headers and at least one data row
             records = self.sheet.get_all_records()
+            logger.info(f"📊 Retrieved {len(records)} records from Google Sheet")
             return records
         except Exception as e:
-            logger.error(f"❌ Error getting all records: {e}")
+            logger.error(f"❌ Error getting all records: {e}", exc_info=True)
             return []
 
     def update_booking_status(self, shipment_id: str, username: str) -> bool:

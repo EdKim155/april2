@@ -4,12 +4,32 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from bot.config import LOGO_PATH
 from bot.database.connection import get_db_session
 from bot.database.crud import get_shipment_by_id
 from bot.utils.keyboards import build_shipment_detail_keyboard
 from bot.utils.messages import get_shipment_detail_message
 
 logger = logging.getLogger(__name__)
+
+
+async def _edit_message_with_keyboard(query, message: str, keyboard):
+    """Helper to edit message caption and keyboard."""
+    try:
+        await query.edit_message_caption(
+            caption=message,
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        logger.error(f"Failed to edit message: {e}")
+        chat = query.message.chat
+        await query.message.delete()
+        with open(LOGO_PATH, 'rb') as photo:
+            await chat.send_photo(
+                photo=photo,
+                caption=message,
+                reply_markup=keyboard
+            )
 
 
 async def handle_view_shipment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -53,7 +73,4 @@ async def handle_view_shipment(update: Update, context: ContextTypes.DEFAULT_TYP
         prefix=prefix
     )
 
-    await query.edit_message_text(
-        text=message,
-        reply_markup=keyboard
-    )
+    await _edit_message_with_keyboard(query, message, keyboard)

@@ -50,3 +50,6 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+# Telegram session files
+*.session
+*.session-journal

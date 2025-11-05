@@ -81,7 +81,7 @@ def build_shipment_detail_keyboard(shipment: Shipment, is_booked_by_user: bool =
 
     if shipment.status == 'available':
         # Show book button if available
-        keyboard.append([InlineKeyboardButton("✅ Забронировать", callback_data=f"shipment:book:{shipment.shipment_id}:{page}:{prefix}")])
+        keyboard.append([InlineKeyboardButton("✅ Подтвердить", callback_data=f"shipment:book:{shipment.shipment_id}:{page}:{prefix}")])
     elif is_booked_by_user:
         # Show cancel button if booked by current user
         keyboard.append([InlineKeyboardButton("❌ Отменить бронирование", callback_data=f"shipment:cancel:{shipment.shipment_id}:{page}")])

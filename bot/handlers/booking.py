@@ -4,6 +4,7 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from bot.config import LOGO_PATH
 from bot.database.connection import get_db_session
 from bot.database.crud import book_shipment, cancel_booking
 from bot.utils.keyboards import (
@@ -18,6 +19,25 @@ from bot.utils.messages import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _edit_message_with_keyboard(query, message: str, keyboard):
+    """Helper to edit message caption and keyboard."""
+    try:
+        await query.edit_message_caption(
+            caption=message,
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        logger.error(f"Failed to edit message: {e}")
+        chat = query.message.chat
+        await query.message.delete()
+        with open(LOGO_PATH, 'rb') as photo:
+            await chat.send_photo(
+                photo=photo,
+                caption=message,
+                reply_markup=keyboard
+            )
 
 
 async def handle_book_shipment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -53,18 +73,20 @@ async def handle_book_shipment(update: Update, context: ContextTypes.DEFAULT_TYP
         # Booking successful
         logger.info(f"✅ Shipment {shipment_id} booked by @{username}")
 
-        # Update Google Sheet
+        # Update Google Sheet immediately
         if context.bot_data.get('sheet_manager'):
             try:
                 sheet_manager = context.bot_data['sheet_manager']
+                logger.info(f"📊 Updating Google Sheet for shipment {shipment_id}...")
                 await context.application.bot.loop.run_in_executor(
                     None,
                     sheet_manager.update_booking_status,
                     shipment_id,
                     username
                 )
+                logger.info(f"✅ Google Sheet updated successfully for {shipment_id}")
             except Exception as e:
-                logger.error(f"❌ Failed to update Google Sheet: {e}")
+                logger.error(f"❌ Failed to update Google Sheet: {e}", exc_info=True)
 
         message = get_booking_success_message(shipment_id, shipment.direction)
         keyboard = build_booking_success_keyboard()
@@ -80,10 +102,7 @@ async def handle_book_shipment(update: Update, context: ContextTypes.DEFAULT_TYP
 
         keyboard = build_booking_failed_keyboard()
 
-    await query.edit_message_text(
-        text=message,
-        reply_markup=keyboard
-    )
+    await _edit_message_with_keyboard(query, message, keyboard)
 
 
 async def handle_cancel_booking(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -118,17 +137,19 @@ async def handle_cancel_booking(update: Update, context: ContextTypes.DEFAULT_TY
         # Cancellation successful
         logger.info(f"✅ Booking cancelled for shipment {shipment_id} by @{username}")
 
-        # Update Google Sheet
+        # Update Google Sheet immediately
         if context.bot_data.get('sheet_manager'):
             try:
                 sheet_manager = context.bot_data['sheet_manager']
+                logger.info(f"📊 Updating Google Sheet for cancellation {shipment_id}...")
                 await context.application.bot.loop.run_in_executor(
                     None,
                     sheet_manager.cancel_booking,
                     shipment_id
                 )
+                logger.info(f"✅ Google Sheet updated successfully (cancelled) for {shipment_id}")
             except Exception as e:
-                logger.error(f"❌ Failed to update Google Sheet: {e}")
+                logger.error(f"❌ Failed to update Google Sheet: {e}", exc_info=True)
 
         message = get_cancellation_success_message(shipment_id)
         keyboard = build_cancellation_success_keyboard()
@@ -138,7 +159,4 @@ async def handle_cancel_booking(update: Update, context: ContextTypes.DEFAULT_TY
         message = f"❌ {message_text}"
         keyboard = build_cancellation_success_keyboard()
 
-    await query.edit_message_text(
-        text=message,
-        reply_markup=keyboard
-    )
+    await _edit_message_with_keyboard(query, message, keyboard)

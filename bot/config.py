@@ -45,3 +45,6 @@ MAX_BOOKINGS_PER_MINUTE = int(os.getenv('MAX_BOOKINGS_PER_MINUTE', 10))
 
 # Pagination
 SHIPMENTS_PER_PAGE = 10
+
+# Logo Configuration
+LOGO_PATH = str(BASE_DIR / 'assets' / 'logo.png')
