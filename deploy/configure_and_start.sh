@@ -79,3 +79,4 @@ echo "Перезапуск бота: systemctl restart april_bot"
 
 
 
+

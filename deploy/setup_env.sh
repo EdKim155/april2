@@ -83,3 +83,4 @@ echo "  Статус:          ssh -i $SSH_KEY $SERVER 'systemctl status april_b
 
 
 
+

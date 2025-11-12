@@ -301,6 +301,30 @@ class TransportBookingBot:
                             if isinstance(btn, KeyboardButtonCallback):
                                 logger.info(f"  [{row_idx},{btn_idx}] '{btn.text}'")
 
+                    # ПРОВЕРКА: Это главное меню? Ищем кнопку "Список перевозок"
+                    menu_button = None
+                    for row in self.last_keyboard.rows:
+                        for button in row.buttons:
+                            if isinstance(button, KeyboardButtonCallback):
+                                button_lower = button.text.lower()
+                                # Ищем кнопку с "список" и "перевозок" (и возможно "прямых")
+                                if 'список' in button_lower and 'перевозок' in button_lower:
+                                    # Приоритет прямым перевозкам (если есть колокольчик или слово "прямых")
+                                    if '🔔' in button.text or 'прямых' in button_lower:
+                                        menu_button = button
+                                        break
+                                    # Если нет прямых, берём любой список перевозок
+                                    elif not menu_button:
+                                        menu_button = button
+                        if menu_button and '🔔' in menu_button.text:
+                            break  # Нашли с колокольчиком - лучшее совпадение
+
+                    # Если нашли главное меню - нажимаем кнопку списка
+                    if menu_button:
+                        logger.info(f"📱 ОБНАРУЖЕНО ГЛАВНОЕ МЕНЮ! Нажимаю кнопку: '{menu_button.text}'")
+                        await self.click_button(menu_button, "(главное меню → список перевозок)", message.id)
+                        return  # Ждём следующего обновления со списком перевозок
+
                     # Проверяем наличие грузовиков - если их нет, значит уже перешли к деталям
                     has_truck = False
                     for row in self.last_keyboard.rows:
@@ -510,6 +534,12 @@ class TransportBookingBot:
                     self.automation_state = None
             else:
                 logger.info("📤 Нет сохраненной клавиатуры, отправляю /start")
+                # Инициализируем State Machine для обработки ответа от бота
+                logger.info("🤖 Инициализирую автоматизацию для обработки ответа...")
+                self.automation_state = 'waiting_list'
+                self.automation_start_time = datetime.now()
+                # Сбрасываем счётчик попыток для новой перевозки
+                self.button_click_attempts = {}
                 await self.send_start_command()
 
         except Exception as e:

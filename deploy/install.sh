@@ -101,3 +101,4 @@ echo "4. Включить автозапуск: systemctl enable april_bot"
 
 
 
+

@@ -73,3 +73,4 @@ echo "6. systemctl enable april_bot  # Для автозапуска"
 
 
 
+
