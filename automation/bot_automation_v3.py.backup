@@ -1,0 +1,328 @@
+#!/usr/bin/env python3
+"""
+Telegram Bot Automation для быстрого бронирования перевозок
+v3: Правильная обработка множественных редактирований
+"""
+
+import os
+import asyncio
+import logging
+from typing import Optional, List
+from datetime import datetime
+from dotenv import load_dotenv
+from telethon import TelegramClient, events
+from telethon.tl.custom import Message
+from telethon.tl.types import KeyboardButtonCallback, ReplyInlineMarkup
+from telethon.tl import functions
+from config import CONFIG
+
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=getattr(logging, CONFIG.get('LOG_LEVEL', 'INFO'))
+)
+logger = logging.getLogger(__name__)
+logging.getLogger('telethon').setLevel(logging.WARNING)
+
+load_dotenv()
+
+API_ID = os.getenv('API_ID')
+API_HASH = os.getenv('API_HASH')
+PHONE_NUMBER = os.getenv('PHONE_NUMBER')
+BOT_USERNAME = os.getenv('BOT_USERNAME')
+SESSION_NAME = os.getenv('SESSION_NAME', 'telegram_session')
+TRIGGER_MESSAGE = "Появились новые перевозки"
+
+class TransportBookingBot:
+    """Автоматизация бронирования перевозок"""
+
+    def __init__(self):
+        self.client = None
+        self.bot_entity = None
+        self.last_keyboard = None
+        self.last_message_id = None
+        self.is_processing = False
+        
+        # State Machine
+        self.automation_state = None
+        self.automation_start_time = None
+        
+        # Отслеживание последней ОБРАБОТАННОЙ комбинации (message_id + состояние)
+        self.last_processed_state_msg = None
+        
+        self.stats = {
+            'triggers_detected': 0,
+            'buttons_clicked': 0,
+            'errors': 0,
+            'start_time': datetime.now()
+        }
+
+    async def initialize(self):
+        """Инициализация клиента Telegram"""
+        logger.info("Инициализация Telegram клиента...")
+        if not API_ID or not API_HASH:
+            raise ValueError("API_ID и API_HASH должны быть указаны в .env файле")
+        self.client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+        await self.client.start(phone=PHONE_NUMBER)
+        logger.info("Успешное подключение к Telegram")
+        if BOT_USERNAME:
+            try:
+                self.bot_entity = await self.client.get_entity(BOT_USERNAME)
+                logger.info(f"Подключен к боту: {BOT_USERNAME}")
+            except Exception as e:
+                logger.error(f"Не удалось найти бота {BOT_USERNAME}: {e}")
+
+    async def save_keyboard(self, message: Message):
+        """Сохранение последней клавиатуры"""
+        if message.reply_markup and isinstance(message.reply_markup, ReplyInlineMarkup):
+            self.last_keyboard = message.reply_markup
+            self.last_message_id = message.id
+            if CONFIG.get('LOG_BUTTONS', True):
+                logger.info(f"Сохранена клавиатура с {len(message.reply_markup.rows)} рядами кнопок")
+                for row_idx, row in enumerate(message.reply_markup.rows):
+                    buttons_text = [btn.text for btn in row.buttons if hasattr(btn, 'text')]
+                    logger.debug(f"  Ряд {row_idx + 1}: {buttons_text}")
+
+    async def find_button_by_keywords(self, keywords: List[str]) -> Optional[tuple]:
+        """Поиск кнопки по ключевым словам"""
+        if not self.last_keyboard:
+            return None
+        for row_idx, row in enumerate(self.last_keyboard.rows):
+            for btn_idx, button in enumerate(row.buttons):
+                if isinstance(button, KeyboardButtonCallback) and hasattr(button, 'text'):
+                    for keyword in keywords:
+                        if keyword.lower() in button.text.lower():
+                            return (row_idx, btn_idx, button)
+        return None
+
+    async def click_button(self, button: KeyboardButtonCallback, button_info: str = "") -> bool:
+        """Нажатие на кнопку"""
+        if not self.last_message_id:
+            logger.warning("Нет ID последнего сообщения")
+            return False
+        try:
+            logger.info(f"⚡ Нажатие на кнопку: '{button.text}' {button_info}")
+            await self.client(
+                functions.messages.GetBotCallbackAnswerRequest(
+                    peer=self.bot_entity,
+                    msg_id=self.last_message_id,
+                    data=button.data
+                )
+            )
+            logger.info(f"✓ Кнопка '{button.text}' успешно нажата")
+            self.stats['buttons_clicked'] += 1
+            return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка при нажатии кнопки: {e}")
+            self.stats['errors'] += 1
+            return False
+
+    async def click_buttons_by_strategy(self) -> bool:
+        """Нажатие кнопок согласно стратегии"""
+        if not self.last_keyboard:
+            logger.warning("Нет сохраненной клавиатуры")
+            return False
+        strategy = CONFIG.get('BUTTON_STRATEGY', 'first')
+        delay = CONFIG.get('DELAY_BETWEEN_CLICKS', 0.1)
+        try:
+            if strategy == 'first':
+                for row_idx, row in enumerate(self.last_keyboard.rows):
+                    for btn_idx, button in enumerate(row.buttons):
+                        if isinstance(button, KeyboardButtonCallback):
+                            return await self.click_button(button, f"(первая, ряд {row_idx + 1})")
+            elif strategy == 'custom':
+                keywords = CONFIG.get('BUTTON_KEYWORDS', [])
+                result = await self.find_button_by_keywords(keywords)
+                if result:
+                    row_idx, btn_idx, button = result
+                    return await self.click_button(button, f"(по ключевым словам, ряд {row_idx + 1})")
+                else:
+                    logger.warning(f"Не найдено кнопок: {keywords}, fallback на первую")
+                    return await self.click_buttons_by_strategy()
+            elif strategy == 'all':
+                success = False
+                for row_idx, row in enumerate(self.last_keyboard.rows):
+                    for btn_idx, button in enumerate(row.buttons):
+                        if isinstance(button, KeyboardButtonCallback):
+                            result = await self.click_button(button, f"(ряд {row_idx + 1}, кнопка {btn_idx + 1})")
+                            if result:
+                                success = True
+                                await asyncio.sleep(delay)
+                return success
+            logger.warning("Не найдено callback кнопок")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Ошибка в стратегии: {e}")
+            self.stats['errors'] += 1
+            return False
+
+    async def continue_automation(self, message: Message):
+        """Продолжение многошаговой автоматизации"""
+        
+        # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Проверяем комбинацию (message_id + state)
+        state_msg_key = f"{message.id}_{self.automation_state}"
+        if self.last_processed_state_msg == state_msg_key:
+            logger.debug(f"⏭️  Пропускаем: {state_msg_key} уже обработан")
+            return
+        
+        logger.info(f"🔄 Состояние: {self.automation_state}, сообщение: {message.id}")
+        
+        # Проверяем таймаут
+        if self.automation_start_time:
+            elapsed = (datetime.now() - self.automation_start_time).total_seconds()
+            if elapsed > 10.0:
+                logger.warning("⏱️ Таймаут автоматизации")
+                self.automation_state = None
+                self.last_processed_state_msg = None
+                return
+
+        try:
+            if self.automation_state == 'waiting_list':
+                # Ждем список перевозок
+                logger.info("📋 Получен список, выбираю первую перевозку...")
+                await asyncio.sleep(0.15)  # Даем время финализироваться
+                
+                if self.last_keyboard and len(self.last_keyboard.rows) > 0:
+                    # ВАЖНО: Ищем кнопку ПЕРЕВОЗКИ (с 🚛), а не кнопку меню
+                    for row in self.last_keyboard.rows:
+                        for button in row.buttons:
+                            if isinstance(button, KeyboardButtonCallback):
+                                # Проверяем что это кнопка перевозки, а не меню
+                                if '🚛' in button.text or button.text.replace(' ', '').replace('.', '').isdigit():
+                                    logger.info(f"⚡ Выбираю перевозку: '{button.text}'")
+                                    # КРИТИЧНО: Помечаем ДО нажатия!
+                                    self.last_processed_state_msg = state_msg_key
+                                    success = await self.click_button(button, "(первая перевозка)")
+                                    if success:
+                                        # Переходим в следующее состояние
+                                        self.automation_state = 'waiting_details'
+                                        logger.info("✅ Шаг 2/3: Выбрана перевозка")
+                                    return
+                    # Если не нашли перевозку - это промежуточный edit, не помечаем как обработанное
+                    logger.debug("⏸️  Нет кнопок перевозок, ждём финального edit")
+                    return
+
+            elif self.automation_state == 'waiting_details':
+                # Ждем детали перевозки
+                logger.info("📦 Получены детали, ищу кнопку подтверждения...")
+                await asyncio.sleep(0.15)  # Даем время финализироваться
+                
+                if self.last_keyboard:
+                    keywords = ['подтвердить', 'забронировать', 'взять']
+                    for row in self.last_keyboard.rows:
+                        for button in row.buttons:
+                            if isinstance(button, KeyboardButtonCallback):
+                                for keyword in keywords:
+                                    if keyword in button.text.lower():
+                                        logger.info(f"✅ Нажимаю: '{button.text}'")
+                                        # КРИТИЧНО: Помечаем ДО нажатия!
+                                        self.last_processed_state_msg = state_msg_key
+                                        success = await self.click_button(button, "(БРОНИРОВАНИЕ)")
+                                        if success:
+                                            self.automation_state = None
+                                            logger.info("🎉 БРОНИРОВАНИЕ ЗАВЕРШЕНО!")
+                                        return
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка в автоматизации: {e}")
+            self.automation_state = None
+            self.last_processed_state_msg = None
+
+    async def process_new_transport(self, message: Message):
+        """Обработка триггера"""
+        if self.is_processing:
+            logger.warning("⚠️  Уже обрабатывается, пропускаем")
+            return
+        self.is_processing = True
+        self.stats['triggers_detected'] += 1
+        logger.info("="*60)
+        logger.info(f"🚨 НОВЫЕ ПЕРЕВОЗКИ! (#{self.stats['triggers_detected']})")
+        logger.info(f"⏱️  {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
+        logger.info("="*60)
+        try:
+            await asyncio.sleep(CONFIG.get('DELAY_AFTER_TRIGGER', 0.05))
+            if self.last_keyboard:
+                logger.info("💨 БЫСТРЫЙ режим (cached keyboard)!")
+                logger.info("🤖 Запуск многошаговой автоматизации...")
+                self.automation_state = 'waiting_list'
+                self.automation_start_time = datetime.now()
+                self.last_processed_state_msg = None  # Сбрасываем
+                success = await self.click_buttons_by_strategy()
+                if success:
+                    logger.info("✅ Шаг 1/3: Список перевозок открыт")
+                else:
+                    logger.warning("⚠️  Не удалось нажать кнопки")
+                    self.automation_state = None
+            else:
+                logger.info("📤 Нет cached keyboard, отправляю /start")
+                await self.send_start_command()
+        except Exception as e:
+            logger.error(f"❌ Ошибка: {e}")
+            self.stats['errors'] += 1
+            self.automation_state = None
+            self.last_processed_state_msg = None
+        finally:
+            self.is_processing = False
+            logger.info("="*60)
+            self.print_stats()
+
+    async def send_start_command(self):
+        """Отправка /start"""
+        if self.bot_entity:
+            await self.client.send_message(self.bot_entity, '/start')
+            logger.info("📨 /start отправлен")
+
+    def print_stats(self):
+        """Статистика"""
+        uptime = datetime.now() - self.stats['start_time']
+        logger.info(f"📊 Триггеров: {self.stats['triggers_detected']}, "
+                   f"Кнопок: {self.stats['buttons_clicked']}, "
+                   f"Ошибок: {self.stats['errors']}, "
+                   f"Время: {uptime}")
+
+    async def handle_message(self, message):
+        """Обработка сообщений"""
+        if self.bot_entity and message.peer_id.user_id != self.bot_entity.id:
+            return
+        await self.save_keyboard(message)
+        if message.text and TRIGGER_MESSAGE in message.text:
+            await self.process_new_transport(message)
+            return
+        if self.automation_state:
+            await self.continue_automation(message)
+
+    async def handle_new_message(self, event):
+        await self.handle_message(event.message)
+
+    async def handle_edited_message(self, event):
+        logger.debug("📝 Сообщение обновлено")
+        await self.handle_message(event.message)
+
+    async def run(self):
+        """Запуск бота"""
+        await self.initialize()
+        strategy = CONFIG.get('BUTTON_STRATEGY', 'first')
+        logger.info("="*60)
+        logger.info("🤖 Telegram Bot Automation v3 - ЗАПУЩЕН")
+        logger.info("="*60)
+        logger.info(f"📱 Триггер: '{TRIGGER_MESSAGE}'")
+        logger.info(f"⚡ Стратегия: '{strategy}'")
+        logger.info(f"💨 Режим: БЫСТРЫЙ + защита от дубликатов")
+        logger.info("="*60)
+        self.client.add_event_handler(self.handle_new_message, events.NewMessage())
+        self.client.add_event_handler(self.handle_edited_message, events.MessageEdited())
+        await self.client.run_until_disconnected()
+
+async def main():
+    try:
+        bot = TransportBookingBot()
+        await bot.run()
+    except KeyboardInterrupt:
+        logger.info("\n" + "="*60)
+        logger.info("👋 Остановка...")
+        logger.info("="*60)
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка: {e}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
