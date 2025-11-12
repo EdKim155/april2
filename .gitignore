@@ -40,3 +40,8 @@ env/
 
 # Logs
 *.log
+logs/
+
+# Database
+*.db
+*.db-journal
