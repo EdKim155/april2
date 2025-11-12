@@ -1,0 +1,25 @@
+ Команды для просмотра логов:
+
+  1. Логи simple_automation (в реальном времени):
+
+  ssh -i ~/.ssh/id_ed25519_aprel root@72.56.76.248 "tail -f /root/simple_automation/simple_automation.log"
+
+  2. Логи automation (в реальном времени):
+
+  ssh -i ~/.ssh/id_ed25519_aprel root@72.56.76.248 "tail -f /root/automation/automation.log"
+
+  3. Последние 50 строк simple_automation:
+
+  ssh -i ~/.ssh/id_ed25519_aprel root@72.56.76.248 "tail -50 /root/simple_automation/simple_automation.log"
+
+  4. Последние 50 строк automation:
+
+  ssh -i ~/.ssh/id_ed25519_aprel root@72.56.76.248 "tail -50 /root/automation/automation.log"
+
+  5. Оба лога одновременно (последние 30 строк каждого):
+
+  ssh -i ~/.ssh/id_ed25519_aprel root@72.56.76.248 "echo '=== SIMPLE AUTOMATION ===' && tail -30 
+  /root/simple_automation/simple_automation.log && echo -e '\n=== AUTOMATION ===' && tail -30 
+  /root/automation/automation.log"
+
+  Хотите посмотреть логи прямо сейчас?

@@ -81,3 +81,7 @@ bash deploy/bot_control.sh backup
 **Сервер:** 72.56.76.248  
 **Директория:** /opt/april_bot
 
+
+
+
+

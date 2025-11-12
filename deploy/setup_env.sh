@@ -79,3 +79,7 @@ echo "  Перезапуск:      ssh -i $SSH_KEY $SERVER 'systemctl restart ap
 echo "  Остановка:       ssh -i $SSH_KEY $SERVER 'systemctl stop april_bot'"
 echo "  Статус:          ssh -i $SSH_KEY $SERVER 'systemctl status april_bot'"
 
+
+
+
+

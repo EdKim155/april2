@@ -9,12 +9,25 @@ import asyncio
 import logging
 from typing import Optional, List
 from datetime import datetime
-from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.tl.custom import Message
 from telethon.tl.types import KeyboardButtonCallback, ReplyInlineMarkup
 from telethon.tl import functions
-from automation_config import CONFIG
+from config import CONFIG
+
+# Загрузка .env файла вручную
+def load_env(env_file='.env'):
+    """Загрузка переменных из .env файла"""
+    if os.path.exists(env_file):
+        with open(env_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    os.environ[key.strip()] = value.strip()
+
+# Загружаем переменные окружения из .env
+load_env()
 
 # Настройка логирования
 logging.basicConfig(
@@ -23,8 +36,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Загрузка переменных окружения
-load_dotenv()
+# Отключаем DEBUG логи от telethon
+logging.getLogger('telethon').setLevel(logging.WARNING)
 
 # Конфигурация
 API_ID = os.getenv('API_ID')
@@ -46,22 +59,20 @@ class TransportBookingBot:
         self.last_message_id = None
         self.is_processing = False
 
-        # Event-driven подход: события для синхронизации
-        self.keyboard_updated = asyncio.Event()
-        self.message_queue = asyncio.Queue()
-
         # State Machine для многошаговой автоматизации
-        self.current_state = None
-        self.state_data = {}
+        self.automation_state = None  # None, 'waiting_list', 'waiting_details', 'waiting_confirm'
+        self.automation_start_time = None
 
-        # Кэш кнопок для быстрого доступа
-        self.button_cache = {}
+        # Защита от дубликатов при множественных edit сообщений
+        self.last_processed_state_msg = None  # Формат: "message_id_state"
+
+        # Защита от зацикливания
+        self.button_click_attempts = {}  # {button_text: count}
+        self.max_button_attempts = 3
 
         self.stats = {
             'triggers_detected': 0,
             'buttons_clicked': 0,
-            'successful_bookings': 0,
-            'failed_bookings': 0,
             'errors': 0,
             'start_time': datetime.now()
         }
@@ -87,87 +98,47 @@ class TransportBookingBot:
                 logger.error(f"Не удалось найти бота {BOT_USERNAME}: {e}")
 
     async def save_keyboard(self, message: Message):
-        """Сохранение последней клавиатуры с кнопками (Event-driven)"""
+        """Сохранение последней клавиатуры с кнопками"""
         if message.reply_markup and isinstance(message.reply_markup, ReplyInlineMarkup):
-            is_update = self.last_message_id == message.id
             self.last_keyboard = message.reply_markup
             self.last_message_id = message.id
 
-            # Обновляем кэш кнопок для быстрого доступа
-            self._update_button_cache()
-
-            # Сигнализируем об обновлении клавиатуры (event-driven)
-            self.keyboard_updated.set()
-
             if CONFIG.get('LOG_BUTTONS', True):
-                action = "Обновлена" if is_update else "Сохранена"
-                logger.info(f"{action} клавиатура с {len(message.reply_markup.rows)} рядами кнопок")
+                logger.info(f"Сохранена клавиатура с {len(message.reply_markup.rows)} рядами кнопок")
                 # Логирование кнопок для отладки
                 for row_idx, row in enumerate(message.reply_markup.rows):
                     buttons_text = [btn.text for btn in row.buttons if hasattr(btn, 'text')]
                     logger.debug(f"  Ряд {row_idx + 1}: {buttons_text}")
 
-    def _update_button_cache(self):
-        """Обновление кэша кнопок для быстрого доступа"""
-        self.button_cache.clear()
+    async def find_button_by_keywords(self, keywords: List[str]) -> Optional[tuple]:
+        """Поиск кнопки по ключевым словам"""
         if not self.last_keyboard:
-            return
+            return None
 
         for row_idx, row in enumerate(self.last_keyboard.rows):
             for btn_idx, button in enumerate(row.buttons):
                 if isinstance(button, KeyboardButtonCallback) and hasattr(button, 'text'):
-                    # Кэшируем кнопки по тексту (в lowercase для поиска)
-                    key = button.text.lower()
-                    self.button_cache[key] = (row_idx, btn_idx, button)
-
-    async def find_button_by_keywords(self, keywords: List[str]) -> Optional[tuple]:
-        """Поиск кнопки по ключевым словам (с использованием кэша)"""
-        if not self.button_cache:
-            return None
-
-        # Сначала ищем точное совпадение
-        for keyword in keywords:
-            key = keyword.lower()
-            if key in self.button_cache:
-                return self.button_cache[key]
-
-        # Затем ищем частичное совпадение
-        for keyword in keywords:
-            key = keyword.lower()
-            for cached_key, button_info in self.button_cache.items():
-                if key in cached_key:
-                    return button_info
-
+                    for keyword in keywords:
+                        if keyword.lower() in button.text.lower():
+                            return (row_idx, btn_idx, button)
         return None
 
-    async def wait_for_keyboard_update(self, timeout: float = None) -> bool:
-        """Ожидание обновления клавиатуры (event-driven подход)"""
-        if timeout is None:
-            timeout = CONFIG.get('KEYBOARD_UPDATE_TIMEOUT', 0.5)
-
-        try:
-            # Сбрасываем флаг перед ожиданием
-            self.keyboard_updated.clear()
-
-            # Ждем обновления с таймаутом
-            await asyncio.wait_for(self.keyboard_updated.wait(), timeout=timeout)
-            return True
-        except asyncio.TimeoutError:
-            logger.debug(f"⏱️ Таймаут ожидания обновления клавиатуры ({timeout}s)")
-            return False
-
-    async def click_button(self, button: KeyboardButtonCallback, button_info: str = "", wait_update: bool = True) -> bool:
-        """Нажатие на конкретную кнопку (оптимизированное)"""
+    async def click_button(self, button: KeyboardButtonCallback, button_info: str = "") -> bool:
+        """Нажатие на конкретную кнопку"""
         if not self.last_message_id:
             logger.warning("Нет ID последнего сообщения")
             return False
 
-        try:
-            logger.info(f"⚡ Нажатие на кнопку: '{button.text}' {button_info}")
+        # Проверка защиты от зацикливания
+        button_text = button.text
+        self.button_click_attempts[button_text] = self.button_click_attempts.get(button_text, 0) + 1
 
-            # Сбрасываем событие перед нажатием, если будем ждать обновления
-            if wait_update:
-                self.keyboard_updated.clear()
+        if self.button_click_attempts[button_text] > self.max_button_attempts:
+            logger.warning(f"⚠️ Кнопка '{button_text}' нажималась {self.max_button_attempts}+ раз, пропускаю")
+            return False
+
+        try:
+            logger.info(f"⚡ Нажатие на кнопку: '{button.text}' {button_info} (попытка {self.button_click_attempts[button_text]})")
 
             await self.client(
                 functions.messages.GetBotCallbackAnswerRequest(
@@ -179,21 +150,21 @@ class TransportBookingBot:
 
             logger.info(f"✓ Кнопка '{button.text}' успешно нажата")
             self.stats['buttons_clicked'] += 1
-
-            # Ждем обновления клавиатуры (event-driven или фиксированная задержка)
-            if wait_update:
-                if CONFIG.get('USE_EVENT_WAIT', True):
-                    await self.wait_for_keyboard_update()
-                else:
-                    # Быстрая фиксированная задержка вместо event wait
-                    delay = CONFIG.get('DELAY_BETWEEN_CLICKS', 0.02)
-                    await asyncio.sleep(delay)
-
+            # Сбрасываем счётчик при успехе
+            self.button_click_attempts[button_text] = 0
             return True
 
         except Exception as e:
-            logger.error(f"❌ Ошибка при нажатии кнопки: {e}")
+            error_msg = str(e)
+            logger.error(f"❌ Ошибка при нажатии кнопки: {error_msg}")
             self.stats['errors'] += 1
+
+            # Если ошибка "Encrypted data invalid" - клавиатура устарела, нужно обновить состояние
+            if "Encrypted data invalid" in error_msg or "invalid" in error_msg.lower():
+                logger.warning("⚠️ Клавиатура устарела, ожидаю обновления...")
+                # Даём время на обновление клавиатуры
+                await asyncio.sleep(0.3)
+
             return False
 
     async def click_buttons_by_strategy(self) -> bool:
@@ -256,128 +227,197 @@ class TransportBookingBot:
             self.stats['errors'] += 1
             return False
 
-    async def auto_book_shipment(self) -> bool:
-        """Автоматическое многошаговое бронирование (State Machine)"""
-        if not CONFIG.get('MULTI_STEP_ENABLED', True):
-            return await self.click_buttons_by_strategy()
+    async def continue_automation(self, message: Message):
+        """Продолжение многошаговой автоматизации"""
+        logger.info(f"🔄 Состояние: {self.automation_state}")
 
-        logger.info("🤖 Запуск автоматического бронирования...")
+        # Защита от дубликатов: используем хеш кнопок чтобы различать редакции сообщения
+        buttons_hash = ""
+        if message.reply_markup and isinstance(message.reply_markup, ReplyInlineMarkup):
+            button_texts = []
+            for row in message.reply_markup.rows:
+                for btn in row.buttons:
+                    if isinstance(btn, KeyboardButtonCallback):
+                        button_texts.append(btn.text)
+            buttons_hash = "_".join(button_texts)
 
-        automation_timeout = CONFIG.get('AUTOMATION_TIMEOUT', 5.0)
-        start_time = datetime.now()
+        state_key = f"{message.id}_{self.automation_state}_{hash(buttons_hash)}"
+        if self.last_processed_state_msg == state_key:
+            logger.debug(f"⏭️ Пропускаем дубликат: {state_key}")
+            return
+        self.last_processed_state_msg = state_key
+
+        # Проверяем таймаут с учетом конфигурации
+        if self.automation_start_time:
+            timeout = CONFIG.get('AUTOMATION_TIMEOUT', 3.0)
+            elapsed = (datetime.now() - self.automation_start_time).total_seconds()
+            if elapsed > timeout:
+                logger.warning(f"⏱️ Таймаут автоматизации ({elapsed:.2f}s > {timeout}s)")
+                self.automation_state = None
+                return
 
         try:
-            # Шаг 1: Нажимаем "Список перевозок"
-            self.current_state = "waiting_for_shipment_list"
-            logger.info("🔄 Состояние: ждем список перевозок")
+            if self.automation_state == 'waiting_list':
+                # Получили список перевозок, выбираем первую
+                logger.info("📋 Получен список перевозок, выбираю первую...")
+                delay = CONFIG.get('DELAY_BETWEEN_CLICKS', 0.15)
+                await asyncio.sleep(delay * 0.5)  # Половина задержки для быстроты
 
-            success = await self.click_buttons_by_strategy()
-            if not success:
-                logger.warning("⚠️  Не удалось открыть список перевозок")
-                self.stats['failed_bookings'] += 1
-                return False
+                if self.last_keyboard and len(self.last_keyboard.rows) > 0:
+                    # Логируем все доступные кнопки
+                    logger.info("🔍 Доступные кнопки в списке:")
+                    for row_idx, row in enumerate(self.last_keyboard.rows):
+                        for btn_idx, btn in enumerate(row.buttons):
+                            if isinstance(btn, KeyboardButtonCallback):
+                                logger.info(f"  [{row_idx},{btn_idx}] '{btn.text}'")
 
-            # Шаг 2: Выбираем первую перевозку из списка
-            self.current_state = "waiting_for_shipment_details"
+                    # НОВАЯ ЛОГИКА: Сначала проверяем, не пропустили ли мы шаг (кнопка подтверждения уже есть)
+                    confirm_keywords = ['подтвердить', 'подтверждаю', 'забронировать', 'бронировать', 'confirm']
+                    confirm_emojis = ['✔️', '✅', '👍']
+                    confirm_button = None
 
-            # Минимальная задержка для обработки (если не используем event wait)
-            if not CONFIG.get('USE_EVENT_WAIT', True):
-                await asyncio.sleep(CONFIG.get('DELAY_BETWEEN_CLICKS', 0.02))
-
-            shipment_button = None
-            if self.last_keyboard:
-                logger.info("📋 Обнаружен список перевозок, выбираю первую...")
-                for row_idx, row in enumerate(self.last_keyboard.rows):
-                    for btn_idx, button in enumerate(row.buttons):
-                        if isinstance(button, KeyboardButtonCallback):
-                            # Первая кнопка в списке - это перевозка
-                            if row_idx == 0:  # Первый ряд
-                                shipment_button = button
-                                success = await self.click_button(
-                                    button,
-                                    f"(первая перевозка, ряд {row_idx + 1})"
-                                )
-                                break
-                    if shipment_button:
-                        break
-
-            if not success or not shipment_button:
-                logger.warning("⚠️  Не найдена перевозка для бронирования")
-                self.stats['failed_bookings'] += 1
-                return False
-
-            # Шаг 3: Ищем кнопку подтверждения
-            self.current_state = "waiting_for_booking_confirmation"
-            logger.info("🔄 Состояние: ждем детали перевозки")
-
-            # Минимальная задержка для обработки (если не используем event wait)
-            if not CONFIG.get('USE_EVENT_WAIT', True):
-                await asyncio.sleep(CONFIG.get('DELAY_BETWEEN_CLICKS', 0.02))
-
-            # Ищем кнопку "Подтвердить" или "Забронировать"
-            booking_keywords = ['подтвердить', 'забронировать', 'взять']
-            booking_button = None
-
-            if self.last_keyboard:
-                logger.info("📦 Обнаружена кнопка бронирования...")
-                for row_idx, row in enumerate(self.last_keyboard.rows):
-                    for btn_idx, button in enumerate(row.buttons):
-                        if isinstance(button, KeyboardButtonCallback):
-                            for keyword in booking_keywords:
-                                if keyword in button.text.lower():
-                                    booking_button = button
+                    for row in self.last_keyboard.rows:
+                        for button in row.buttons:
+                            if isinstance(button, KeyboardButtonCallback):
+                                # Проверяем эмодзи подтверждения
+                                if any(emoji in button.text for emoji in confirm_emojis):
+                                    confirm_button = button
                                     break
-                        if booking_button:
+                                # Проверяем ключевые слова
+                                button_lower = button.text.lower()
+                                if any(keyword in button_lower for keyword in confirm_keywords):
+                                    confirm_button = button
+                                    break
+                        if confirm_button:
                             break
-                    if booking_button:
-                        break
 
-            if not booking_button:
-                logger.warning("⚠️  Не найдена кнопка бронирования")
-                self.stats['failed_bookings'] += 1
-                return False
+                    # Если нашли кнопку подтверждения - значит бот уже на шаге подтверждения
+                    if confirm_button:
+                        logger.warning("⚠️ ОБНАРУЖЕНА РАССИНХРОНИЗАЦИЯ: уже на шаге подтверждения!")
+                        logger.info("🔄 Автоматически переключаюсь в состояние 'waiting_details'")
+                        logger.info(f"✅ Нашел кнопку подтверждения: '{confirm_button.text}'")
+                        await self.click_button(confirm_button, "(АВТОИСПРАВЛЕНИЕ рассинхронизации)")
+                        self.automation_state = None
+                        logger.info("🎉 АВТОМАТИЧЕСКОЕ БРОНИРОВАНИЕ ЗАВЕРШЕНО!")
+                        return
 
-            # Шаг 4: Подтверждаем бронирование
-            self.current_state = "booking_in_progress"
-            logger.info("🔄 Состояние: выполняется бронирование")
+                    # Ищем кнопку с грузовиком 🚛 или 🚚 (это рейс)
+                    truck_button = None
+                    for row in self.last_keyboard.rows:
+                        for button in row.buttons:
+                            if isinstance(button, KeyboardButtonCallback):
+                                # Проверяем наличие эмодзи грузовика или цифр (ID рейса)
+                                if '🚛' in button.text or '🚚' in button.text or any(char.isdigit() for char in button.text[:3]):
+                                    truck_button = button
+                                    break
+                        if truck_button:
+                            break
 
-            success = await self.click_button(
-                booking_button,
-                "(БРОНИРОВАНИЕ)",
-                wait_update=True
-            )
+                    # Если нашли рейс - нажимаем на него
+                    if truck_button:
+                        logger.info(f"⚡ Выбираю перевозку с грузовиком: '{truck_button.text}'")
+                        await self.click_button(truck_button, "(перевозка с 🚛/🚚)")
+                        self.automation_state = 'waiting_details'
+                        return
 
-            if success:
-                # Проверяем таймаут
-                elapsed = (datetime.now() - start_time).total_seconds()
-                if elapsed > automation_timeout:
-                    logger.warning(f"⏱️ Таймаут автоматизации ({automation_timeout}s)")
+                    # Если не нашли грузовик - возможно это еще главное меню, пропускаем
+                    logger.warning("⚠️ Не нашел кнопку с грузовиком 🚛 - возможно еще главное меню")
+                    logger.warning("⚠️ Жду следующего обновления...")
+                    # НЕ сбрасываем state, ждем следующего сообщения
 
-                # Минимальная задержка для проверки результата
-                if not CONFIG.get('USE_EVENT_WAIT', True):
-                    await asyncio.sleep(CONFIG.get('DELAY_BETWEEN_CLICKS', 0.02))
+            elif self.automation_state == 'waiting_details':
+                # Получили детали перевозки, ищем кнопку подтверждения
+                logger.info("📦 Получены детали, ищу кнопку подтверждения...")
 
-                # Если клавиатура изменилась на меню, значит успех
-                self.current_state = "completed"
-                logger.info("🎉 УСПЕШНОЕ БРОНИРОВАНИЕ!")
-                self.stats['successful_bookings'] += 1
-                return True
-            else:
-                logger.warning("⚠️  Не удалось подтвердить бронирование")
-                self.stats['failed_bookings'] += 1
-                return False
+                # ВАЖНО: Даём время клавиатуре обновиться
+                # Telegram отправляет несколько edit событий, последнее - с правильной клавиатурой
+                delay = CONFIG.get('DELAY_BETWEEN_CLICKS', 0.15)
+                await asyncio.sleep(delay * 2)  # УВЕЛИЧЕННАЯ задержка для получения правильной клавиатуры
 
-        except asyncio.TimeoutError:
-            logger.warning(f"⏱️ Таймаут автоматизации ({automation_timeout}s)")
-            self.stats['failed_bookings'] += 1
-            return False
+                if self.last_keyboard:
+                    # Логируем ВСЕ кнопки для отладки
+                    logger.info("🔍 Все доступные кнопки:")
+                    all_buttons = []
+                    has_truck = False
+                    for row_idx, row in enumerate(self.last_keyboard.rows):
+                        for btn_idx, button in enumerate(row.buttons):
+                            if isinstance(button, KeyboardButtonCallback):
+                                logger.info(f"  Кнопка [{row_idx},{btn_idx}]: '{button.text}'")
+                                all_buttons.append((button, row_idx, btn_idx))
+                                if '🚛' in button.text:
+                                    has_truck = True
+
+                    # Проверяем, что это НЕ список рейсов (должны быть детали)
+                    if has_truck:
+                        logger.warning("⚠️ Клавиатура всё ещё содержит грузовики 🚛 - это старая клавиатура!")
+                        logger.warning("⚠️ Жду правильную клавиатуру с кнопкой подтверждения...")
+                        # НЕ сбрасываем state, ждём следующего обновления
+                        return
+
+                    # Список ключевых слов и эмодзи для кнопки подтверждения
+                    keywords = [
+                        'подтвердить', 'подтверждаю', 'подтверждение',
+                        'забронировать', 'бронировать', 'бронирую', 'бронирование',
+                        'взять перевозку', 'беру', 'взял',
+                        'оформить', 'оформляю', 'оформление',
+                        'занять', 'занимаю',
+                        'согласен',
+                        'confirm', 'book', 'accept'
+                    ]
+                    confirm_emojis = ['✔️', '✅', '👍', '✓']
+
+                    # Пытаемся найти кнопку по эмодзи или ключевым словам
+                    found = False
+                    for button, row_idx, btn_idx in all_buttons:
+                        button_text = button.text
+                        button_text_lower = button_text.lower()
+
+                        # Сначала проверяем эмодзи
+                        for emoji in confirm_emojis:
+                            if emoji in button_text:
+                                logger.info(f"✅ Нашел кнопку подтверждения по эмодзи: '{button.text}' (эмодзи: '{emoji}')")
+                                await self.click_button(button, f"(БРОНИРОВАНИЕ по эмодзи '{emoji}')")
+                                self.automation_state = None
+                                logger.info("🎉 АВТОМАТИЧЕСКОЕ БРОНИРОВАНИЕ ЗАВЕРШЕНО!")
+                                found = True
+                                return
+
+                        # Затем проверяем ключевые слова
+                        for keyword in keywords:
+                            if keyword in button_text_lower:
+                                logger.info(f"✅ Нашел кнопку подтверждения: '{button.text}' (совпадение: '{keyword}')")
+                                await self.click_button(button, f"(БРОНИРОВАНИЕ по слову '{keyword}')")
+                                self.automation_state = None
+                                logger.info("🎉 АВТОМАТИЧЕСКОЕ БРОНИРОВАНИЕ ЗАВЕРШЕНО!")
+                                found = True
+                                return
+
+                    # FALLBACK: Если не нашли по ключевым словам, нажимаем первую кнопку
+                    # НО исключаем кнопки главного меню
+                    if not found and all_buttons:
+                        # Исключаем кнопки меню
+                        menu_keywords = ['список', 'меню', 'настройки', 'возврат', 'назад']
+                        for button, row_idx, btn_idx in all_buttons:
+                            button_lower = button.text.lower()
+                            is_menu = any(mk in button_lower for mk in menu_keywords)
+                            if not is_menu:
+                                logger.warning(f"⚠️ Кнопка подтверждения не найдена по ключевым словам!")
+                                logger.warning(f"⚠️ Нажимаю первую НЕ-МЕНЮ кнопку: '{button.text}'")
+                                await self.click_button(button, "(FALLBACK: первая не-меню кнопка)")
+                                self.automation_state = None
+                                logger.info("🎉 АВТОМАТИЧЕСКОЕ БРОНИРОВАНИЕ ЗАВЕРШЕНО (FALLBACK)")
+                                found = True
+                                return
+
+                    if not found:
+                        logger.error("❌ НЕТ ДОСТУПНЫХ КНОПОК ПОДТВЕРЖДЕНИЯ!")
+                        self.automation_state = None
+
         except Exception as e:
-            logger.error(f"❌ Ошибка в автоматическом бронировании: {e}")
-            self.stats['errors'] += 1
-            self.stats['failed_bookings'] += 1
-            return False
-        finally:
-            self.current_state = None
+            logger.error(f"❌ Ошибка в автоматизации: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            self.automation_state = None
 
     async def process_new_transport(self, message: Message):
         """Обработка сообщения о новых перевозках"""
@@ -391,7 +431,6 @@ class TransportBookingBot:
         logger.info("="*60)
         logger.info(f"🚨 ОБНАРУЖЕНЫ НОВЫЕ ПЕРЕВОЗКИ! (#{self.stats['triggers_detected']})")
         logger.info(f"⏱️  Время: {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
-        logger.info("🤖 Запуск автоматического бронирования...")
         logger.info("="*60)
 
         try:
@@ -401,12 +440,22 @@ class TransportBookingBot:
             # Используем сохраненную клавиатуру вместо отправки /start
             if self.last_keyboard:
                 logger.info("💨 Использую сохраненную клавиатуру (БЫСТРЫЙ режим!)")
+                logger.info("🤖 Запускаю многошаговую автоматизацию...")
 
-                # Запускаем автоматическое многошаговое бронирование
-                success = await self.auto_book_shipment()
+                # Инициализируем State Machine
+                self.automation_state = 'waiting_list'
+                self.automation_start_time = datetime.now()
+                # Сбрасываем счётчик попыток для новой перевозки
+                self.button_click_attempts = {}
 
-                if not success:
-                    logger.warning("⚠️  Автоматическое бронирование не удалось")
+                # Нажимаем первую кнопку (Список перевозок)
+                success = await self.click_buttons_by_strategy()
+
+                if success:
+                    logger.info("✅ Шаг 1/3: Открываю список перевозок")
+                else:
+                    logger.warning("⚠️  Не удалось нажать кнопки")
+                    self.automation_state = None
             else:
                 logger.info("📤 Нет сохраненной клавиатуры, отправляю /start")
                 await self.send_start_command()
@@ -414,6 +463,7 @@ class TransportBookingBot:
         except Exception as e:
             logger.error(f"❌ Ошибка при обработке новых перевозок: {e}")
             self.stats['errors'] += 1
+            self.automation_state = None
         finally:
             self.is_processing = False
             logger.info("="*60)
@@ -430,13 +480,11 @@ class TransportBookingBot:
         uptime = datetime.now() - self.stats['start_time']
         logger.info(f"📊 Статистика: Триггеров: {self.stats['triggers_detected']}, "
                    f"Кнопок нажато: {self.stats['buttons_clicked']}, "
-                   f"Успешных бронирований: {self.stats['successful_bookings']}, "
-                   f"Неудачных бронирований: {self.stats['failed_bookings']}, "
                    f"Ошибок: {self.stats['errors']}, "
                    f"Время работы: {uptime}")
 
     async def handle_message(self, message):
-        """Общая логика обработки сообщений (новых и отредактированных)"""
+        """Общая логика обработки сообщений"""
         # Проверяем, что сообщение от нужного бота
         if self.bot_entity and message.peer_id.user_id != self.bot_entity.id:
             return
@@ -447,16 +495,19 @@ class TransportBookingBot:
         # Проверяем триггерное сообщение
         if message.text and TRIGGER_MESSAGE in message.text:
             await self.process_new_transport(message)
+            return
 
-    @events.register(events.NewMessage)
+        # Если идет автоматизация, продолжаем
+        if self.automation_state:
+            await self.continue_automation(message)
+
     async def handle_new_message(self, event):
         """Обработчик новых сообщений"""
         await self.handle_message(event.message)
 
-    @events.register(events.MessageEdited)
     async def handle_edited_message(self, event):
-        """Обработчик редактированных сообщений"""
-        logger.debug("🔄 Обнаружено редактирование сообщения")
+        """Обработчик редактированных сообщений (для edit)"""
+        logger.debug("📝 Сообщение обновлено (edit)")
         await self.handle_message(event.message)
 
     async def run(self):
@@ -470,13 +521,18 @@ class TransportBookingBot:
         logger.info(f"📱 Триггерное сообщение: '{TRIGGER_MESSAGE}'")
         logger.info(f"⚡ Стратегия кнопок: '{strategy}'")
         logger.info(f"💨 Режим: МАКСИМАЛЬНО БЫСТРЫЙ (без /start)")
-        logger.info(f"🔄 Отслеживание: новые + редактированные сообщения")
         logger.info(f"⏱️  Задержка после триггера: {CONFIG.get('DELAY_AFTER_TRIGGER', 0.05)}с")
         logger.info("="*60)
 
-        # Регистрация обработчиков
-        self.client.add_event_handler(self.handle_new_message)
-        self.client.add_event_handler(self.handle_edited_message)
+        # Регистрация обработчиков (БЕЗ декоратора!)
+        self.client.add_event_handler(
+            self.handle_new_message,
+            events.NewMessage()
+        )
+        self.client.add_event_handler(
+            self.handle_edited_message,
+            events.MessageEdited()
+        )
 
         # Запуск клиента
         await self.client.run_until_disconnected()

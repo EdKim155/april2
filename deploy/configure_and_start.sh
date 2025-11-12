@@ -75,3 +75,7 @@ echo "Просмотр логов: journalctl -u april_bot -f"
 echo "Остановка бота: systemctl stop april_bot"
 echo "Перезапуск бота: systemctl restart april_bot"
 
+
+
+
+

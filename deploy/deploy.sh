@@ -69,3 +69,7 @@ echo "4. systemctl start april_bot"
 echo "5. systemctl status april_bot"
 echo "6. systemctl enable april_bot  # Для автозапуска"
 
+
+
+
+

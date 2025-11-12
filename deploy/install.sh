@@ -97,3 +97,7 @@ echo "2. Добавить Google Sheets credentials в $INSTALL_DIR/credentials/
 echo "3. Запустить бота: systemctl start april_bot"
 echo "4. Включить автозапуск: systemctl enable april_bot"
 
+
+
+
+
